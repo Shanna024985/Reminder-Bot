@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config();
 import { verifyKey } from 'discord-interactions';
 import { getFakeUsername } from './game.js';
 
@@ -7,8 +8,8 @@ export function VerifyDiscordRequest(clientKey) {
     const signature = req.get('X-Signature-Ed25519');
     const timestamp = req.get('X-Signature-Timestamp');
     console.log(signature, timestamp, clientKey);
-
     const isValidRequest = verifyKey(buf, signature, timestamp, clientKey);
+    
     if (!isValidRequest) {
       res.status(401).send('Bad request signature');
       throw new Error('Bad request signature');
@@ -112,4 +113,33 @@ export function createPlayerEmbed(profile) {
       url: 'https://raw.githubusercontent.com/shaydewael/example-app/main/assets/fake-icon.png',
     },
   };
+}
+export function parseDiscordTimestamp(input) {
+    const match = input.match(/<t:(\d+)(?::[tTdDfFR])?>/);
+
+    if (!match) {
+        return null;
+    }
+
+    const timestamp = Number(match[1]);
+
+    if (!Number.isSafeInteger(timestamp)) {
+        return null;
+    }
+
+    const date = new Date(timestamp * 1000);
+
+    if (Number.isNaN(date.getTime())) {
+        return null;
+    }
+
+    return {
+        unix: timestamp,
+        date: date,
+        singaporeTime: date.toLocaleString('en-SG', {
+            timeZone: 'Asia/Singapore',
+            dateStyle: 'full',
+            timeStyle: 'short'
+        })
+    };
 }

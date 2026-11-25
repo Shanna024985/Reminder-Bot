@@ -1,26 +1,103 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config();
 import express from 'express';
 import { InteractionType, InteractionResponseType } from 'discord-interactions';
 import {
   VerifyDiscordRequest,
   getServerLeaderboard,
   createPlayerEmbed,
+  parseDiscordTimestamp
 } from './utils.js';
 import { getFakeProfile, getWikiItem } from './game.js';
-
+import cron from 'node-cron';
 // Create an express app
 const app = express();
 // Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
 // Parse request body and verifies incoming requests using discord-interactions package
 app.use(express.json({ verify: VerifyDiscordRequest(process.env.PUBLIC_KEY) }));
+app.get("/", (req, res) => {
+  res.send("Hello")
+})
+const ALLOWED_USERS = [
+  "713746365938663474"
+];
+const reminders = [];
+async function sendDM(userId, message, channelId) {
+  // Create or retrieve the DM channel
+  const dmResponse = await fetch(
+    'https://discord.com/api/v10/users/@me/channels',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${process.env.DISCORD_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        recipient_id: userId
+      })
+    }
+  );
 
+  if (!dmResponse.ok) {
+    throw new Error(await dmResponse.text());
+  }
+
+  const dmChannel = await dmResponse.json();
+
+  // Send the DM
+  const messageResponse = await fetch(
+    `https://discord.com/api/v10/channels/${dmChannel.id}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${process.env.DISCORD_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        content: `${message}\n<#${channelId}>`
+      })
+    }
+  );
+
+  if (!messageResponse.ok) {
+    throw new Error(await messageResponse.text());
+  }
+}
 /**
  * Interactions endpoint URL where Discord will send HTTP requests
  */
+cron.schedule('* * * * *', async () => {
+
+  console.log('Checking reminders...');
+
+  const currentTime = Math.floor(Date.now() / 1000);
+
+  for (const reminder of reminders) {
+
+    if (!reminder.sent && currentTime >= reminder.reminderTime) {
+
+      try {
+        await sendDM(
+          reminder.userId,
+          reminder.message,
+          reminder.channelId
+        );
+
+        reminder.sent = true;
+
+        console.log('Reminder sent!');
+
+      } catch (error) {
+        console.error('Failed to send reminder:', error);
+      }
+    }
+  }
+
+});
 app.post('/interactions', async function (req, res) {
   // Interaction type and data
-  const { type, data } = req.body;
+  const { type, data, member } = req.body;
 
   /**
    * Handle verification requests
@@ -39,94 +116,84 @@ app.post('/interactions', async function (req, res) {
   if (type === InteractionType.APPLICATION_COMMAND) {
     const { name } = data;
 
-    // "leaderboard" command
-    if (name === 'leaderboard') {
-      // Send a message into the channel where command was triggered from
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content: await getServerLeaderboard(req.body.guild.id),
-          allowed_mentions: {
-            parse: [],
-          },
-        },
-      });
-    }
-    // "profile" command
-    if (name === 'profile') {
-      const profile = getFakeProfile(0);
-      const profileEmbed = createPlayerEmbed(profile);
+    if (name === 'reminder') {
+      let haveEntry = false
+      ALLOWED_USERS.forEach((value) => {
+        if (member.user.id == value) {
+          haveEntry = true
+        }
+      })
+      if (haveEntry) {
+        const userId = data.options.find(
+          option => option.name === 'user'
+        ).value;
 
-      // Use interaction context that the interaction was triggered from
-      const interactionContext = req.body.context;
+        const message = data.options.find(
+          option => option.name === 'message'
+        ).value;
 
-      // Construct `data` for our interaction response. The profile embed will be included regardless of interaction context
-      let profilePayloadData = {
-        embeds: [profileEmbed],
-      };
+        const channel = data.options.find(
+          option => option.name === 'channel'
+        ).value;
 
-      // If profile isn't run in a DM with the app, we'll make the response ephemeral and add a share button
-      if (interactionContext !== 1) {
-        // Make message ephemeral
-        profilePayloadData['flags'] = 64;
-        // Add button to components
-        profilePayloadData['components'] = [
-          {
-            type: 1,
-            components: [
-              {
-                type: 2,
-                label: 'Share Profile',
-                custom_id: 'share_profile',
-                style: 2,
-              },
-            ],
-          },
-        ];
+        const deadline = data.options.find(
+          option => option.name === 'reminder_time'
+        ).value;
+
+        const dates = parseDiscordTimestamp(deadline);
+
+        if (!dates) {
+          return res.send({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: 'Invalid timestamp!',
+              flags: 64
+            }
+          });
+        }
+
+        // Calculate waiting time
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+
+        const secondsNeededToWait = dates.unix - currentTimestamp;
+
+        if (secondsNeededToWait <= 0) {
+          return res.send({
+            type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+            data: {
+              content: 'The reminder time must be in the future!',
+              flags: 64
+            }
+          });
+        }
+
+        // Acknowledge Discord immediately
+        res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `Reminder scheduled for <t:${dates.unix}:F>!`,
+            flags: 64
+          }
+        });
+        reminders.push({
+          userId: userId,
+          message: message,
+          channelId: channel,
+          reminderTime: dates.unix,
+          sent: false
+        });
+
+        return;
+      } else {
+        res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: `You do not have permission to use this bot`,
+            flags: 64
+          }
+        });
       }
 
-      // Send response
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: profilePayloadData,
-      });
-    }
-    // "link" command
-    if (name === 'link') {
-      // Send a message into the channel where command was triggered from
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content:
-            'Authorize your Quests of Wumpus account with your Discord profile.',
-          components: [
-            {
-              type: 1,
-              components: [
-                {
-                  type: 2,
-                  label: 'Link Account',
-                  style: 5,
-                  // If you were building this functionality, you could guide the user through authorizing via your game/site
-                  url: 'https://discord.com/developers/docs/intro',
-                },
-              ],
-            },
-          ],
-        },
-      });
-    }
-    // "wiki" command
-    if (name === 'wiki') {
-      const option = data.options[0];
-      const selectedItem = getWikiItem(option.value);
-      // Send a message into the channel where command was triggered from
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content: `${selectedItem.emoji} **${selectedItem.name}**: ${selectedItem.description}`,
-        },
-      });
     }
   }
 
